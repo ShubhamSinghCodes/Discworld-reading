@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Series Reading Order - Graph Layout</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Trebuchet MS", sans-serif;
+      background: #fdf8e7;
+      color: #3c2f2f;
+      line-height: 1.4;
+      overflow: hidden;
+    }
+    .top-bar {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 0 1rem; margin-bottom: 1rem;
+    }
+    h1 { margin: 0.5rem 0; }
+    .toggle-dark {
+      padding: 0.5rem 1rem;
+      background: #8d694f; color: #fff;
+      border: none; cursor: pointer;
+      transition: background 0.3s;
+    }
+    .toggle-dark:hover { background: #6f533e; }
+    .graph-container {
+      width: 100vw; height: calc(100vh - 70px);
+      position: relative;
+    }
+    svg {
+      width: 100%; height: 100%;
+      background: #fdf8e7;
+    }
+    /* Link styles */
+    .link {
+      stroke-width: 2px; opacity: 0.7;
+    }
+    .link.direct { stroke: #3c2f2f; }
+    .link.indirect {
+      stroke: #3c2f2f; stroke-dasharray: 4,3;
+    }
+    .node-label {
+      pointer-events: none;
+      fill: #3c2f2f;
+      font-size: 7px;
+      text-anchor: middle;
+      alignment-baseline: middle;
+    }
+    .arrowhead { fill: #3c2f2f; }
+    /* Dark mode adjustments */
+    .dark body { background: #121212; color: #ddd; }
+    .dark svg { background: #121212; }
+    .dark .toggle-dark { background: #444; }
+    .dark .link.direct { stroke: #ddd; }
+    .dark .link.indirect { stroke: #ddd; }
+    .dark .node-label { fill: #ddd; }
+    .dark .arrowhead { fill: #ddd; }
+    /* PDF modal using object tag */
+    .pdf-modal, .suggestion-modal {
+      display: none;
+      position: fixed; top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: rgba(0,0,0,0.8);
+      justify-content: center; align-items: center;
+      z-index: 9999;
+    }
+    .pdf-content, .suggestion-content {
+      background: #fff;
+      width: 90%; height: 90%;
+      position: relative;
+      padding: 1rem;
+      overflow: auto;
+    }
+    .pdf-close, .suggestion-close {
+      position: absolute; top: 0.5rem; right: 0.5rem;
+      background: #c00; color: #fff;
+      border: none; padding: 0.3rem 0.6rem;
+      cursor: pointer;
+    }
+    .pdf-object {
+      width: 100%; height: 100%;
+      border: none;
+    }
+    /* Control buttons */
+    .status-btn, .suggestion-btn, .set-page-btn {
+      padding: 0.4rem 0.8rem;
+      margin: 0.3rem;
+      background: #3c2f2f; color: #fff;
+      border: none; cursor: pointer;
+      transition: background 0.3s;
+    }
+    .status-btn:hover, .suggestion-btn:hover, .set-page-btn:hover {
+      background: #555;
+    }
+  </style>
+</head>
+<body>
+
+<div class="top-bar">
+  <button class="toggle-dark" id="toggleDarkBtn">Toggle Dark Mode</button>
+  <h1>Series Reading Order - Graph Layout</h1>
+</div>
+
+<div class="graph-container">
+  <svg id="graphSvg"></svg>
+</div>
+
+<!-- Hidden PDF Store -->
+<script id="pdfStore" type="application/json">
+  {{ pdf_store_json|safe }}
+</script>
+
+<!-- PDF Modal using object tag -->
+<div class="pdf-modal" id="pdfModal">
+  <div class="pdf-content">
+    <button class="pdf-close" id="pdfCloseBtn">Close</button>
+    <div style="position:absolute; top:0.5rem; left:0.5rem;">
+      <button class="status-btn" id="finishBtn">Finish Book</button>
+      <button class="status-btn" id="skipBtn">Skip Book</button>
+      <button class="set-page-btn" id="setPageBtn">Set Current Page</button>
+    </div>
+    <object class="pdf-object" id="pdfObject" type="application/pdf" data=""></object>
+  </div>
+</div>
+
+<!-- Suggestion Modal for next books -->
+<div class="suggestion-modal" id="suggestionModal">
+  <div class="suggestion-content">
+    <button class="suggestion-close" id="suggestionCloseBtn">Close</button>
+    <h2>Next Book Suggestions</h2>
+    <div id="suggestionsContainer"></div>
+  </div>
+</div>
+
+<script>
+  // Graph data from compile_pdfs.py
+  const graphData = {{ graph_json|safe }};
+  let pdfStore = null;
+  function loadPdfStore() {
+    if (!pdfStore) {
+      const el = document.getElementById('pdfStore');
+      pdfStore = JSON.parse(el.textContent);
+    }
+  }
+
+  // Local storage keys for status and progress
+  const STATUS_KEY = 'readingStatuses';
+  const PROGRESS_KEY = 'readingProgress';
+
+  function loadStatuses() {
+    const s = localStorage.getItem(STATUS_KEY);
+    return s ? JSON.parse(s) : {};
+  }
+  function saveStatus(bookId, status) {
+    const statuses = loadStatuses();
+    statuses[bookId] = status;
+    localStorage.setItem(STATUS_KEY, JSON.stringify(statuses));
+  }
+  function loadProgress() {
+    const p = localStorage.getItem(PROGRESS_KEY);
+    return p ? JSON.parse(p) : {};
+  }
+  function saveProgress(bookId, page) {
+    const progress = loadProgress();
+    progress[bookId] = page;
+    localStorage.setItem(PROGRESS_KEY, JSON.stringify(progress));
+  }
+
+  // Virtual layout dimensions (simulation domain remains fixed)
+  const layoutWidth = 2000, layoutHeight = 2000;
+
+  // Set initial positions deterministically:
+  // - X coordinate is based on book id.
+  // - Y coordinate is based on subseries.
+  const maxId = Math.max(...graphData.nodes.map(n => n.id));
+  const subseriesSet = new Set(graphData.nodes.map(n => n.subseries));
+  const subseriesArray = Array.from(subseriesSet).sort(); // sorted alphabetically
+  graphData.nodes.forEach(n => {
+    // X: scale id into layout width.
+    n.x = n.id * (layoutWidth / (maxId + 1));
+    // Y: based on subseries row.
+    let rowIndex = subseriesArray.indexOf(n.subseries);
+    n.y = (rowIndex + 1) * (layoutHeight / (subseriesArray.length + 1));
+    n.vx = 0; n.vy = 0;
+  });
+
+  // Force simulation parameters.
+  const linkDistance = 140, linkStrength = 0.08, repulsion = 30000;
+  // Rightward force: pull nodes toward the right edge; for starting nodes (n.start is truthy string), reverse.
+  const marginRight = 50;
+  const rightwardForce = 0.005, damping = 0.5;
+  const simulationDuration = 4000; // 4 seconds simulation
+
+  // Animate force simulation using requestAnimationFrame.
+  let simulationStart = null;
+  function simulateStep(timestamp) {
+    if (!simulationStart) simulationStart = timestamp;
+    const elapsed = timestamp - simulationStart;
+    for (let iter = 0; iter < 3; iter++) {
+      // Edge attractions.
+      for (let e of graphData.edges) {
+        let s = graphData.nodes.find(nn => nn.id === e.source);
+        let t = graphData.nodes.find(nn => nn.id === e.target);
+        let dx = t.x - s.x, dy = t.y - s.y;
+        let dist = Math.sqrt(dx*dx + dy*dy) || 1;
+        let force = (dist - linkDistance) * linkStrength;
+        let fx = force * (dx/dist), fy = force * (dy/dist);
+        s.vx += fx; s.vy += fy;
+        t.vx -= fx; t.vy -= fy;
+      }
+      // Node repulsions.
+      for (let i = 0; i < graphData.nodes.length; i++) {
+        for (let j = i+1; j < graphData.nodes.length; j++) {
+          let n1 = graphData.nodes[i], n2 = graphData.nodes[j];
+          let dx = n2.x - n1.x, dy = n2.y - n1.y;
+          let dist2 = dx*dx + dy*dy || 1;
+          let force = repulsion / dist2;
+          let dist = Math.sqrt(dist2);
+          let fx = force * (dx/dist), fy = force * (dy/dist);
+          n1.vx -= fx; n1.vy -= fy;
+          n2.vx += fx; n2.vy += fy;
+        }
+      }
+      // Rightward force.
+      for (let n of graphData.nodes) {
+        let targetX = layoutWidth - marginRight;
+        let dx = targetX - n.x;
+        let cf = n.start ? rightwardForce * -2.5 : rightwardForce;
+        n.vx += dx * cf;
+      }
+      // Integrate velocities and clamp positions.
+      for (let n of graphData.nodes) {
+        n.vx *= damping;
+        n.vy *= damping;
+        n.x += n.vx;
+        n.y += n.vy;
+        n.x = Math.max(30, Math.min(layoutWidth - 140, n.x));
+        n.y = Math.max(30, Math.min(layoutHeight - 140, n.y));
+      }
+    }
+
+    drawGraph();
+
+    if (elapsed < simulationDuration) {
+      requestAnimationFrame(simulateStep);
+    }
+  }
+
+  function drawGraph() {
+    const svg = document.getElementById('graphSvg');
+    // Set viewBox to fill available container (viewport dimensions)
+    const vw = window.innerWidth, vh = window.innerHeight;
+    svg.setAttribute("viewBox", `0 0 ${vw} ${vh}`);
+    svg.innerHTML = "";
+
+    const svgNS = "http://www.w3.org/2000/svg";
+    const statuses = loadStatuses();
+
+    // Marker definition for arrowheads.
+    const defs = document.createElementNS(svgNS, "defs");
+    const marker = document.createElementNS(svgNS, "marker");
+    marker.setAttribute("id", "arrowhead");
+    marker.setAttribute("markerWidth", "10");
+    marker.setAttribute("markerHeight", "7");
+    marker.setAttribute("refX", "10");
+    marker.setAttribute("refY", "3.5");
+    marker.setAttribute("orient", "auto");
+    marker.setAttribute("markerUnits", "userSpaceOnUse");
+    const polygon = document.createElementNS(svgNS, "polygon");
+    polygon.setAttribute("points", "0 0, 10 3.5, 0 7");
+    polygon.setAttribute("class", "arrowhead");
+    marker.appendChild(polygon);
+    defs.appendChild(marker);
+    svg.appendChild(defs);
+
+    // Scale simulation coordinates to viewBox.
+    const scaleX = x => x * (vw / layoutWidth);
+    const scaleY = y => y * (vh / layoutHeight);
+
+    // Draw edges with arrowheads.
+    graphData.edges.forEach(e => {
+      const s = graphData.nodes.find(nn => nn.id === e.source);
+      const t = graphData.nodes.find(nn => nn.id === e.target);
+      const sx1 = scaleX(s.x), sy1 = scaleY(s.y);
+      const sx2_full = scaleX(t.x), sy2_full = scaleY(t.y);
+      const dx = sx2_full - sx1, dy = sy2_full - sy1;
+      const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+      const offset = 30;
+      const sx2 = sx2_full - (dx/dist)*offset;
+      const sy2 = sy2_full - (dy/dist)*offset;
+
+      const line = document.createElementNS(svgNS, "line");
+      line.setAttribute("x1", sx1);
+      line.setAttribute("y1", sy1);
+      line.setAttribute("x2", sx2);
+      line.setAttribute("y2", sy2);
+      line.setAttribute("class", "link " + e.edgeType);
+      line.setAttribute("marker-end", "url(#arrowhead)");
+      svg.appendChild(line);
+    });
+
+    // Draw nodes and labels.
+    graphData.nodes.forEach(n => {
+      const circle = document.createElementNS(svgNS, "circle");
+      circle.setAttribute("cx", scaleX(n.x));
+      circle.setAttribute("cy", scaleY(n.y));
+      circle.setAttribute("r", 30);
+      circle.style.fill = n.color || "#999";
+      circle.style.cursor = "pointer";
+      circle.addEventListener('click', () => openPDF(n.id));
+      svg.appendChild(circle);
+
+      const label = document.createElementNS(svgNS, "text");
+      label.setAttribute("x", scaleX(n.x));
+      label.setAttribute("y", scaleY(n.y) + 4);
+      label.setAttribute("class", "node-label");
+      label.textContent = n.title;
+      svg.appendChild(label);
+
+      // Outline based on reading status.
+      const status = statuses[n.id] || "not started";
+      let strokeColor = null;
+      if (status === "reading") strokeColor = "blue";
+      else if (status === "finished") strokeColor = "green";
+      else if (status === "skipped") strokeColor = "red";
+      if (strokeColor) {
+        const statusOutline = document.createElementNS(svgNS, "circle");
+        statusOutline.setAttribute("cx", scaleX(n.x));
+        statusOutline.setAttribute("cy", scaleY(n.y));
+        statusOutline.setAttribute("r", 33);
+        statusOutline.setAttribute("stroke", strokeColor);
+        statusOutline.setAttribute("stroke-width", "4");
+        statusOutline.setAttribute("fill", "none");
+        svg.appendChild(statusOutline);
+      }
+
+      // Draw starting arrow if n.start is a string.
+      if (n.start && typeof n.start === "string") {
+        const arrowGroup = document.createElementNS(svgNS, "g");
+        let ax, ay, ax2, arrowLabelX;
+        if (n.x < layoutWidth / 2) {
+          ax = 5;
+          ay = scaleY(n.y);
+          ax2 = scaleX(n.x) - 35;
+          arrowLabelX = ax + 10;
+        } else {
+          ax = vw - 5;
+          ay = scaleY(n.y);
+          ax2 = scaleX(n.x) + 35;
+          arrowLabelX = ax - 100;
+        }
+        const startArrow = document.createElementNS(svgNS, "line");
+        startArrow.setAttribute("x1", ax);
+        startArrow.setAttribute("y1", ay);
+        startArrow.setAttribute("x2", ax2);
+        startArrow.setAttribute("y2", ay);
+        startArrow.setAttribute("stroke", "#e67e22");
+        startArrow.setAttribute("stroke-width", "2");
+        startArrow.setAttribute("marker-end", "url(#arrowhead)");
+        arrowGroup.appendChild(startArrow);
+        const arrowLabel = document.createElementNS(svgNS, "text");
+        arrowLabel.setAttribute("x", arrowLabelX);
+        arrowLabel.setAttribute("y", ay - 5);
+        arrowLabel.setAttribute("fill", "#e67e22");
+        arrowLabel.setAttribute("font-size", "10");
+        arrowLabel.textContent = n.start;
+        arrowGroup.appendChild(arrowLabel);
+        svg.appendChild(arrowGroup);
+
+        const startOutline = document.createElementNS(svgNS, "circle");
+        startOutline.setAttribute("cx", scaleX(n.x));
+        startOutline.setAttribute("cy", scaleY(n.y));
+        startOutline.setAttribute("r", 34);
+        startOutline.setAttribute("stroke", "#e67e22");
+        startOutline.setAttribute("stroke-width", "3");
+        startOutline.setAttribute("fill", "none");
+        svg.appendChild(startOutline);
+      }
+    });
+  }
+
+  function openPDF(bookId) {
+    loadPdfStore();
+    const pdfData = pdfStore[bookId];
+    if (!pdfData) return;
+    const progress = loadProgress();
+    const page = progress[bookId];
+    let url = pdfData;
+    if (page) {
+      url += "#page=" + page;
+    }
+    saveStatus(bookId, "reading");
+    const modal = document.getElementById('pdfModal');
+    const pdfObject = document.getElementById('pdfObject');
+    pdfObject.setAttribute("data", url);
+    modal.style.display = 'flex';
+  }
+  document.getElementById('pdfCloseBtn').addEventListener('click', () => {
+    closePDFModal();
+  });
+  function closePDFModal() {
+    const modal = document.getElementById('pdfModal');
+    document.getElementById('pdfObject').setAttribute("data", "");
+    modal.style.display = 'none';
+  }
+
+  document.getElementById('finishBtn').addEventListener('click', () => {
+    const currentBookId = getCurrentBookId();
+    if (currentBookId != null) {
+      saveStatus(currentBookId, "finished");
+      closePDFModal();
+      suggestNextBooks(currentBookId);
+    }
+  });
+  document.getElementById('skipBtn').addEventListener('click', () => {
+    const currentBookId = getCurrentBookId();
+    if (currentBookId != null) {
+      saveStatus(currentBookId, "skipped");
+      closePDFModal();
+      suggestNextBooks(currentBookId);
+    }
+  });
+  document.getElementById('setPageBtn').addEventListener('click', () => {
+    const currentBookId = getCurrentBookId();
+    if (currentBookId != null) {
+      let newPage = prompt("Enter current page number:");
+      if (newPage != null) {
+        newPage = parseInt(newPage);
+        if (!isNaN(newPage)) {
+          saveProgress(currentBookId, newPage);
+          alert("Progress saved: Page " + newPage);
+        }
+      }
+    }
+  });
+
+  function getCurrentBookId() {
+    const statuses = loadStatuses();
+    for (let n of graphData.nodes) {
+      if (statuses[n.id] === "reading") {
+        return n.id;
+      }
+    }
+    return null;
+  }
+
+  function suggestNextBooks(bookId) {
+    const outgoing = graphData.edges.filter(e => e.source === bookId);
+    if (outgoing.length === 0) {
+      alert("No next books found.");
+      return;
+    }
+    const direct = outgoing.filter(e => e.edgeType === "direct").map(e => e.target);
+    const indirect = outgoing.filter(e => e.edgeType === "indirect").map(e => e.target);
+    const suggestions = direct.concat(indirect);
+    const uniqueSuggestions = [...new Set(suggestions)];
+
+    const container = document.getElementById('suggestionsContainer');
+    container.innerHTML = "";
+    uniqueSuggestions.forEach(id => {
+      const node = graphData.nodes.find(nn => nn.id === id);
+      const btn = document.createElement("button");
+      btn.textContent = node.title;
+      btn.className = "suggestion-btn";
+      btn.addEventListener('click', () => {
+        saveStatus(id, "reading");
+        openPDF(id);
+        closeSuggestionModal();
+      });
+      container.appendChild(btn);
+    });
+    openSuggestionModal();
+  }
+  function openSuggestionModal() {
+    document.getElementById('suggestionModal').style.display = 'flex';
+  }
+  function closeSuggestionModal() {
+    document.getElementById('suggestionModal').style.display = 'none';
+  }
+  document.getElementById('suggestionCloseBtn').addEventListener('click', closeSuggestionModal);
+
+  const toggleDarkBtn = document.getElementById('toggleDarkBtn');
+  toggleDarkBtn.addEventListener('click', () => {
+    document.documentElement.classList.toggle('dark');
+    localStorage.setItem('darkMode', document.documentElement.classList.contains('dark'));
+  });
+  if (localStorage.getItem('darkMode') === 'true') {
+    document.documentElement.classList.add('dark');
+  }
+
+  window.addEventListener('load', () => {
+    requestAnimationFrame(simulateStep);
+    window.addEventListener('resize', drawGraph);
+  });
+</script>
+
+</body>
+</html>
