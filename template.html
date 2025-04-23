@@ -78,23 +78,19 @@
       border: none; padding: 0.3rem 0.6rem;
       cursor: pointer;
     }
-    .pdf-container {
-      overflow: auto;
-      -webkit-overflow-scrolling: touch
-    }
     .pdf-object {
-      width: 100%; height: 1000000px;
+      width: 100%; height: 100%;
       border: none;
     }
     /* Control buttons */
-    .status-btn, .suggestion-btn, .set-page-btn {
+    .status-btn, .suggestion-btn, .set-page-btn, .status-btn {
       padding: 0.4rem 0.8rem;
       margin: 0.3rem;
       background: #3c2f2f; color: #fff;
       border: none; cursor: pointer;
       transition: background 0.3s;
     }
-    .status-btn:hover, .suggestion-btn:hover, .set-page-btn:hover {
+    .status-btn:hover, .suggestion-btn:hover, .set-page-btn:hover, .status-btn:hover {
       background: #555;
     }
   </style>
@@ -123,10 +119,9 @@
       <button class="status-btn" id="finishBtn">Finish Book</button>
       <button class="status-btn" id="skipBtn">Skip Book</button>
       <button class="set-page-btn" id="setPageBtn">Set Current Page</button>
+      <button class="status-btn" id="openNewTabBtn">Open in New Tab</button>
     </div>
-    <div class="pdf-container">
-      <object class="pdf-object" id="pdfObject" type="application/pdf" data=""></object>
-    </div>
+    <object class="pdf-object" id="pdfObject" type="application/pdf" data=""></object>
   </div>
 </div>
 
@@ -438,6 +433,46 @@
           alert("Progress saved: Page " + newPage);
         }
       }
+    }
+  });
+  // What cursed code needs to be written just for Safari :(
+  document.getElementById('openNewTabBtn').addEventListener('click', () => {
+    const pdfObject = document.getElementById('pdfObject');
+    const pdfDataUrl = pdfObject.getAttribute('data'); // This is the data: URL
+
+    if (pdfDataUrl && pdfDataUrl.startsWith('data:')) {
+      // Parse the data URL
+      const byteCharacters = atob(pdfDataUrl.split(',')[1]);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      const mimeString = pdfDataUrl.split(',')[0].split(':')[1].split(';')[0]; // Extract mime type
+
+      // Create a Blob from the data
+      const blob = new Blob([byteArray], { type: mimeString });
+
+      // Create an Object URL (Blob URL)
+      const objectUrl = URL.createObjectURL(blob);
+
+      // Use the link trick with the Object URL instead of the Data URL
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.target = '_blank';
+
+      // Append to body, click, and remove
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      // Clean up the Object URL after a short delay (to allow new tab to load)
+      // Note: Revoking too early can prevent the new tab from loading the content.
+      // A small delay is a common heuristic, but perfect cleanup on navigation is tricky.
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 100);
+
+    } else {
+        console.error("No data URL found or data URL is invalid.");
     }
   });
 
